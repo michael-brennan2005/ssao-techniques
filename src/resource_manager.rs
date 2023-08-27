@@ -1,8 +1,10 @@
 use std::{borrow::Cow, num::NonZeroU64};
 
+use egui::Color32;
+use pollster::block_on;
 pub use wgpu::{
-    AddressMode, BufferUsages, CompareFunction, FilterMode, SamplerBindingType, ShaderStages,
-    TextureFormat, TextureSampleType, TextureUsages, VertexBufferLayout,
+    AddressMode, BufferAddress, BufferUsages, CompareFunction, FilterMode, SamplerBindingType,
+    ShaderStages, TextureFormat, TextureSampleType, TextureUsages, VertexAttribute, VertexStepMode,
 };
 
 // MARK: Descriptors
@@ -108,42 +110,49 @@ impl Default for BindGroupDesc<'_> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct ShaderModuleDesc<'a> {
-    pub path: &'a str,
-    pub entry_func: &'a str,
+#[derive(Clone)]
+pub struct VertexBufferLayout {
+    pub array_stride: BufferAddress,
+    pub step_mode: VertexStepMode,
+    pub attributes: Vec<VertexAttribute>,
 }
 
-#[derive(Clone, Copy)]
-pub struct ShaderPipelineDesc<'a> {
+#[derive(Clone)]
+pub struct ShaderModuleDesc {
+    pub path: String,
+    pub entry_func: String,
+}
+
+#[derive(Clone)]
+pub struct ShaderPipelineDesc {
     pub depth_test: Option<CompareFunction>,
-    pub targets: &'a [TextureFormat],
-    pub vertex_buffer_bindings: &'a [VertexBufferLayout<'a>],
+    pub targets: Vec<TextureFormat>,
+    pub vertex_buffer_bindings: Vec<VertexBufferLayout>,
 }
 
-#[derive(Clone, Copy)]
-pub struct ShaderDesc<'a> {
-    pub label: Option<&'a str>,
-    pub vs: ShaderModuleDesc<'a>,
-    pub ps: Option<ShaderModuleDesc<'a>>,
-    pub bind_group_layouts: &'a [Handle],
-    pub pipeline_state: ShaderPipelineDesc<'a>,
+#[derive(Clone)]
+pub struct ShaderDesc {
+    pub label: Option<String>,
+    pub vs: ShaderModuleDesc,
+    pub ps: Option<ShaderModuleDesc>,
+    pub bind_group_layouts: Vec<Handle>,
+    pub pipeline_state: ShaderPipelineDesc,
 }
 
-impl Default for ShaderDesc<'_> {
+impl Default for ShaderDesc {
     fn default() -> Self {
         ShaderDesc {
             label: None,
             vs: ShaderModuleDesc {
-                path: "",
-                entry_func: "vs_main",
+                path: String::from(""),
+                entry_func: String::from("vs_main"),
             },
             ps: None,
-            bind_group_layouts: &[],
+            bind_group_layouts: vec![],
             pipeline_state: ShaderPipelineDesc {
                 depth_test: None,
-                targets: &[],
-                vertex_buffer_bindings: &[],
+                targets: vec![],
+                vertex_buffer_bindings: vec![],
             },
         }
     }
@@ -186,10 +195,111 @@ pub struct BindGroup {
 }
 
 pub struct Shader {
+    desc: ShaderDesc,
     internal: wgpu::RenderPipeline,
 }
 
 impl Shader {
+    fn new(rm: &mut ResourceManager, desc: ShaderDesc) -> Self {
+        if desc.ps.is_some() && desc.ps.as_ref().unwrap().path != desc.vs.path {
+            panic!("only supporting ps and vs shaders from same file right now")
+        }
+
+        let source = std::fs::read_to_string(desc.vs.path.clone()).unwrap();
+
+        let shader = rm
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(desc.vs.path.clone().as_str()),
+                source: wgpu::ShaderSource::Wgsl(Cow::from(source.as_str())),
+            });
+
+        let mut bind_group_layouts: Vec<&wgpu::BindGroupLayout> = vec![];
+        for entry in &desc.bind_group_layouts {
+            bind_group_layouts.push(&rm.bind_group_layouts[entry.0].internal);
+        }
+
+        let targets = desc
+            .pipeline_state
+            .targets
+            .iter()
+            .map(|x| {
+                Some(wgpu::ColorTargetState {
+                    format: *x,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            })
+            .collect::<Vec<Option<wgpu::ColorTargetState>>>();
+
+        let mut buffers: Vec<wgpu::VertexBufferLayout> = vec![];
+        for buffer in &desc.pipeline_state.vertex_buffer_bindings {
+            buffers.push(wgpu::VertexBufferLayout {
+                array_stride: buffer.array_stride,
+                step_mode: buffer.step_mode,
+                attributes: &buffer.attributes,
+            });
+        }
+
+        let pipeline =
+            rm.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: desc.label.as_deref(),
+                    layout: Some(&rm.device.create_pipeline_layout(
+                        &wgpu::PipelineLayoutDescriptor {
+                            label: None,
+                            bind_group_layouts: bind_group_layouts.as_slice(),
+                            push_constant_ranges: &[],
+                        },
+                    )),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: desc.vs.entry_func.as_str(),
+                        buffers: &buffers,
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        unclipped_depth: false,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        conservative: false,
+                    },
+                    depth_stencil: if let Some(depth_test) = desc.pipeline_state.depth_test {
+                        Some(wgpu::DepthStencilState {
+                            format: TextureFormat::Depth32Float, // FIXME: move into variable/ texture-impl constant
+                            depth_write_enabled: true,
+                            depth_compare: depth_test,
+                            stencil: wgpu::StencilState::default(),
+                            bias: wgpu::DepthBiasState::default(),
+                        })
+                    } else {
+                        None
+                    },
+                    multisample: wgpu::MultisampleState {
+                        count: 1,
+                        mask: !0,
+                        alpha_to_coverage_enabled: false,
+                    },
+                    fragment: if desc.ps.is_some() {
+                        Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: desc.ps.as_ref().unwrap().entry_func.as_str(),
+                            targets: &targets,
+                        })
+                    } else {
+                        None
+                    },
+                    multiview: None,
+                });
+
+        Self {
+            desc,
+            internal: pipeline,
+        }
+    }
+
     pub fn pipeline(&self) -> &wgpu::RenderPipeline {
         &self.internal
     }
@@ -211,6 +321,8 @@ pub struct ResourceManager {
     bind_group_layouts: Vec<BindGroupLayout>,
     bind_groups: Vec<BindGroup>,
     shaders: Vec<Shader>,
+
+    shader_compilation_error: String,
 }
 
 impl ResourceManager {
@@ -232,6 +344,8 @@ impl ResourceManager {
             bind_group_layouts: vec![],
             bind_groups: vec![],
             shaders: vec![],
+
+            shader_compilation_error: String::new(),
         }
     }
 
@@ -434,92 +548,10 @@ impl ResourceManager {
         Handle(self.bind_group_layouts.len() - 1)
     }
 
-    pub fn create_shader(&mut self, desc: &ShaderDesc) -> Handle {
-        if desc.ps.is_some() && desc.ps.unwrap().path != desc.vs.path {
-            panic!("only supporting ps and vs shaders from same file right now")
-        }
+    pub fn create_shader(&mut self, desc: ShaderDesc) -> Handle {
+        let shader = Shader::new(self, desc);
 
-        let source = std::fs::read_to_string(desc.vs.path).unwrap();
-
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(desc.vs.path),
-                source: wgpu::ShaderSource::Wgsl(Cow::from(source.as_str())),
-            });
-
-        let mut bind_group_layouts: Vec<&wgpu::BindGroupLayout> = vec![];
-        for entry in desc.bind_group_layouts {
-            bind_group_layouts.push(&self.bind_group_layouts[entry.0].internal);
-        }
-
-        let targets = desc
-            .pipeline_state
-            .targets
-            .iter()
-            .map(|x| {
-                Some(wgpu::ColorTargetState {
-                    format: *x,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })
-            })
-            .collect::<Vec<Option<wgpu::ColorTargetState>>>();
-
-        let pipeline = self
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: desc.label,
-                layout: Some(&self.device.create_pipeline_layout(
-                    &wgpu::PipelineLayoutDescriptor {
-                        label: None,
-                        bind_group_layouts: bind_group_layouts.as_slice(),
-                        push_constant_ranges: &[],
-                    },
-                )),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: desc.vs.entry_func,
-                    buffers: desc.pipeline_state.vertex_buffer_bindings,
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    unclipped_depth: false,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    conservative: false,
-                },
-                depth_stencil: if let Some(depth_test) = desc.pipeline_state.depth_test {
-                    Some(wgpu::DepthStencilState {
-                        format: TextureFormat::Depth32Float, // FIXME: move into variable/ texture-impl constant
-                        depth_write_enabled: true,
-                        depth_compare: depth_test,
-                        stencil: wgpu::StencilState::default(),
-                        bias: wgpu::DepthBiasState::default(),
-                    })
-                } else {
-                    None
-                },
-                multisample: wgpu::MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                fragment: if desc.ps.is_some() {
-                    Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: desc.ps.unwrap().entry_func,
-                        targets: &targets,
-                    })
-                } else {
-                    None
-                },
-                multiview: None,
-            });
-
-        self.shaders.push(Shader { internal: pipeline });
+        self.shaders.push(shader);
 
         Handle(self.shaders.len() - 1)
     }
@@ -535,5 +567,59 @@ impl ResourceManager {
     pub fn update_buffer(&self, handle: Handle, data: &[u8]) {
         self.queue
             .write_buffer(&self.buffers[handle.0].internal, 0, data);
+    }
+
+    pub fn recompile(&mut self, handle: Handle) {
+        let shader = &self.shaders[handle.0];
+
+        let source = std::fs::read_to_string(shader.desc.vs.path.clone()).unwrap();
+
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        _ = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: shader.desc.label.as_deref(),
+                source: wgpu::ShaderSource::Wgsl(Cow::from(source.as_str())),
+            });
+        let result = self.device.pop_error_scope();
+        match block_on(result) {
+            Some(err) => {
+                self.shader_compilation_error = err.to_string();
+            }
+            None => {
+                self.shader_compilation_error = String::new();
+                self.shaders[handle.0] = Shader::new(self, shader.desc.clone());
+            }
+        }
+    }
+
+    pub fn egui(&mut self, ui: &mut egui::Ui) {
+        ui.label(format!("Buffers created: {}", self.buffers.len()));
+        ui.label(format!("Textures created: {}", self.textures.len()));
+        ui.label(format!("Samplers created: {}", self.samplers.len()));
+        ui.label(format!(
+            "BindGroupLayouts created: {}",
+            self.bind_group_layouts.len()
+        ));
+        ui.label(format!("BindGroups created: {}", self.bind_groups.len()));
+        ui.label(format!("Shaders created: {}", self.shaders.len()));
+
+        ui.label(egui::RichText::new("Shaders").strong());
+        egui::Grid::new("shaders").show(ui, |ui| {
+            let paths: Vec<String> = self
+                .shaders
+                .iter()
+                .map(|x| x.desc.vs.path.clone())
+                .collect();
+
+            for (i, path) in paths.iter().enumerate() {
+                ui.label(path);
+                if ui.button("Reload").clicked() {
+                    self.recompile(Handle(i));
+                }
+            }
+        });
+
+        ui.label(egui::RichText::new(&self.shader_compilation_error).color(Color32::RED));
     }
 }

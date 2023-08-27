@@ -29,21 +29,21 @@ impl Renderer {
             initial_data: None,
         });
 
-        let shader = rm.create_shader(&ShaderDesc {
+        let shader = rm.create_shader(ShaderDesc {
             label: None,
             vs: ShaderModuleDesc {
-                path: "src/shaders/test.wgsl",
-                entry_func: "vs_main",
+                path: String::from("src/shaders/test.wgsl"),
+                entry_func: String::from("vs_main"),
             },
             ps: Some(ShaderModuleDesc {
-                path: "src/shaders/test.wgsl",
-                entry_func: "fs_main",
+                path: String::from("src/shaders/test.wgsl"),
+                entry_func: String::from("fs_main"),
             }),
-            bind_group_layouts: &[],
+            bind_group_layouts: vec![],
             pipeline_state: ShaderPipelineDesc {
                 depth_test: Some(CompareFunction::Less),
-                targets: &[TextureFormat::Bgra8UnormSrgb],
-                vertex_buffer_bindings: &[],
+                targets: vec![TextureFormat::Bgra8UnormSrgb],
+                vertex_buffer_bindings: vec![],
             },
         });
 
@@ -65,7 +65,9 @@ impl Renderer {
 
     pub fn ui(&mut self, ctx: &egui::Context) {
         egui::Window::new("Renderer").show(ctx, |ui| {
-            ui.add(egui::Slider::new(&mut self.x, 0..=3));
+            egui::CollapsingHeader::new("Resources").show(ui, |ui| {
+                self.rm.egui(ui);
+            });
         });
     }
 
