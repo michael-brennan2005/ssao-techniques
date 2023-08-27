@@ -1,0 +1,16 @@
+[package]
+name = "ssao-techniques"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+egui = "0.22.0"
+egui-wgpu = { path = "egui-wgpu" }
+egui-winit = "0.22.0"
+env_logger = "0.10.0"
+glam = "0.24.1"
+pollster = "0.3.0"
+wgpu = "0.17.0"
+winit = "0.28.6"
