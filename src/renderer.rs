@@ -1,15 +1,22 @@
+use winit::event::WindowEvent;
+
 use crate::{
+    camera::{Camera, CameraController, FlyCamera},
     resource_manager::{
         CompareFunction, Handle, ResourceManager, ShaderDesc, ShaderModuleDesc, ShaderPipelineDesc,
         TextureDesc, TextureFormat, TextureUsages, DEPTH_FORMAT,
     },
+    scene::Scene,
     EguiRenderData,
 };
 
 pub struct Renderer {
     rm: ResourceManager,
     egui: egui_wgpu::Renderer,
-    x: u32,
+    scene: Scene,
+
+    camera: Camera,
+    camera_controller: Box<dyn CameraController>,
 
     depth_buffer: Handle,
     shader: Handle,
@@ -17,6 +24,11 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(mut rm: ResourceManager) -> Self {
+        let scene = Scene::new(&mut rm);
+
+        let camera = Camera::default();
+        let fly_camera = Box::new(FlyCamera::new());
+
         let depth_buffer = rm.create_texture(&TextureDesc {
             label: Some("Depth buffer"),
             dimensions: (
@@ -55,11 +67,13 @@ impl Renderer {
         );
 
         Self {
+            scene,
             rm,
             depth_buffer,
-            x: 0,
             shader,
             egui,
+            camera,
+            camera_controller: fly_camera,
         }
     }
 
@@ -68,10 +82,34 @@ impl Renderer {
             egui::CollapsingHeader::new("Resources").show(ui, |ui| {
                 self.rm.egui(ui);
             });
+
+            egui::CollapsingHeader::new("Loader").show(ui, |ui| {
+                if ui.button("Load glTF").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("glTF", &["gltf", "glb"])
+                        .pick_file()
+                    {
+                        self.scene =
+                            Scene::load_gltf(&mut self.rm, &String::from(path.to_str().unwrap()));
+                    }
+                }
+            });
+
+            self.camera_controller.ui(&mut self.camera, ui);
         });
     }
 
+    pub fn input(&mut self, event: &WindowEvent) {
+        self.camera_controller.input(event);
+    }
+
     pub fn update(&mut self, egui_render_data: EguiRenderData) {
+        self.camera_controller.update(&mut self.camera);
+        self.rm.update_buffer(
+            self.scene.scene_uniform,
+            bytemuck::cast_slice(&[self.camera.build_uniforms()]),
+        );
+
         let output = self.rm.surface.get_current_texture().unwrap();
         let view = output
             .texture

@@ -13,8 +13,10 @@ pub const WIDTH: u32 = 1600;
 pub const HEIGHT: u32 = 900;
 pub const BACKEND: wgpu::Backends = wgpu::Backends::DX12;
 
+mod camera;
 mod renderer;
 mod resource_manager;
+mod scene;
 
 pub struct EguiRenderData {
     clipped_primitives: Vec<ClippedPrimitive>,
@@ -111,6 +113,7 @@ fn main() {
     event_loop.run(move |event, _, control_flow| match event {
         winit::event::Event::WindowEvent { window_id, event } if window_id == window.id() => {
             _ = egui_state.on_event(&egui_context, &event);
+            renderer.input(&event);
             match event {
                 WindowEvent::CloseRequested
                 | WindowEvent::KeyboardInput {

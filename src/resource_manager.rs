@@ -1,4 +1,4 @@
-use std::{borrow::Cow, num::NonZeroU64};
+use std::{borrow::Cow, collections::HashMap, num::NonZeroU64};
 
 use egui::Color32;
 use pollster::block_on;
@@ -10,7 +10,7 @@ pub use wgpu::{
 // MARK: Descriptors
 pub struct BufferDesc<'a> {
     pub label: Option<&'a str>,
-    pub byte_size: u64,
+    pub byte_size: usize,
     pub usage: BufferUsages,
     pub initial_data: Option<&'a [u8]>,
 }
@@ -68,22 +68,23 @@ impl Default for SamplerDesc<'_> {
     }
 }
 
-pub struct BindGroupLayoutDesc<'a> {
-    pub label: Option<&'a str>,
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct BindGroupLayoutDesc {
+    pub label: Option<String>,
     pub visibility: ShaderStages,
-    pub buffers: &'a [u64],
-    pub textures: &'a [TextureSampleType],
-    pub samplers: &'a [SamplerBindingType],
+    pub buffers: Vec<usize>,
+    pub textures: Vec<TextureSampleType>,
+    pub samplers: Vec<SamplerBindingType>,
 }
 
-impl Default for BindGroupLayoutDesc<'_> {
+impl Default for BindGroupLayoutDesc {
     fn default() -> Self {
         BindGroupLayoutDesc {
             label: None,
             visibility: ShaderStages::all(),
-            buffers: &[],
-            textures: &[],
-            samplers: &[],
+            buffers: vec![],
+            textures: vec![],
+            samplers: vec![],
         }
     }
 }
@@ -91,7 +92,7 @@ impl Default for BindGroupLayoutDesc<'_> {
 pub struct BindGroupDesc<'a> {
     pub label: Option<&'a str>,
     pub visibility: ShaderStages,
-    pub layout: Handle,
+    pub layout: BindGroupLayoutDesc,
     pub buffers: &'a [Handle],
     pub textures: &'a [Handle],
     pub samplers: &'a [Handle],
@@ -101,7 +102,13 @@ impl Default for BindGroupDesc<'_> {
     fn default() -> Self {
         BindGroupDesc {
             label: None,
-            layout: Handle(0),
+            layout: BindGroupLayoutDesc {
+                label: None,
+                visibility: ShaderStages::all(),
+                buffers: vec![],
+                textures: vec![],
+                samplers: vec![],
+            },
             visibility: ShaderStages::all(),
             buffers: &[],
             textures: &[],
@@ -135,7 +142,7 @@ pub struct ShaderDesc {
     pub label: Option<String>,
     pub vs: ShaderModuleDesc,
     pub ps: Option<ShaderModuleDesc>,
-    pub bind_group_layouts: Vec<Handle>,
+    pub bind_group_layouts: Vec<BindGroupLayoutDesc>,
     pub pipeline_state: ShaderPipelineDesc,
 }
 
@@ -186,10 +193,6 @@ pub struct Sampler {
     internal: wgpu::Sampler,
 }
 
-pub struct BindGroupLayout {
-    internal: wgpu::BindGroupLayout,
-}
-
 pub struct BindGroup {
     internal: wgpu::BindGroup,
 }
@@ -214,9 +217,9 @@ impl Shader {
                 source: wgpu::ShaderSource::Wgsl(Cow::from(source.as_str())),
             });
 
-        let mut bind_group_layouts: Vec<&wgpu::BindGroupLayout> = vec![];
+        let mut bind_group_layouts: Vec<wgpu::BindGroupLayout> = vec![];
         for entry in &desc.bind_group_layouts {
-            bind_group_layouts.push(&rm.bind_group_layouts[entry.0].internal);
+            bind_group_layouts.push(rm.get_bind_group_layout(entry));
         }
 
         let targets = desc
@@ -241,58 +244,63 @@ impl Shader {
             });
         }
 
-        let pipeline =
-            rm.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: desc.label.as_deref(),
-                    layout: Some(&rm.device.create_pipeline_layout(
-                        &wgpu::PipelineLayoutDescriptor {
+        let pipeline = rm
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: desc.label.as_deref(),
+                layout: Some(
+                    &rm.device
+                        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                             label: None,
-                            bind_group_layouts: bind_group_layouts.as_slice(),
+                            bind_group_layouts: bind_group_layouts
+                                .iter()
+                                .map(|x| x)
+                                .collect::<Vec<&wgpu::BindGroupLayout>>()
+                                .as_slice(),
                             push_constant_ranges: &[],
-                        },
-                    )),
-                    vertex: wgpu::VertexState {
+                        }),
+                ),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: desc.vs.entry_func.as_str(),
+                    buffers: &buffers,
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: if let Some(depth_test) = desc.pipeline_state.depth_test {
+                    Some(wgpu::DepthStencilState {
+                        format: TextureFormat::Depth32Float, // FIXME: move into variable/ texture-impl constant
+                        depth_write_enabled: true,
+                        depth_compare: depth_test,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    })
+                } else {
+                    None
+                },
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                fragment: if desc.ps.is_some() {
+                    Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: desc.vs.entry_func.as_str(),
-                        buffers: &buffers,
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        strip_index_format: None,
-                        front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: None,
-                        unclipped_depth: false,
-                        polygon_mode: wgpu::PolygonMode::Fill,
-                        conservative: false,
-                    },
-                    depth_stencil: if let Some(depth_test) = desc.pipeline_state.depth_test {
-                        Some(wgpu::DepthStencilState {
-                            format: TextureFormat::Depth32Float, // FIXME: move into variable/ texture-impl constant
-                            depth_write_enabled: true,
-                            depth_compare: depth_test,
-                            stencil: wgpu::StencilState::default(),
-                            bias: wgpu::DepthBiasState::default(),
-                        })
-                    } else {
-                        None
-                    },
-                    multisample: wgpu::MultisampleState {
-                        count: 1,
-                        mask: !0,
-                        alpha_to_coverage_enabled: false,
-                    },
-                    fragment: if desc.ps.is_some() {
-                        Some(wgpu::FragmentState {
-                            module: &shader,
-                            entry_point: desc.ps.as_ref().unwrap().entry_func.as_str(),
-                            targets: &targets,
-                        })
-                    } else {
-                        None
-                    },
-                    multiview: None,
-                });
+                        entry_point: desc.ps.as_ref().unwrap().entry_func.as_str(),
+                        targets: &targets,
+                    })
+                } else {
+                    None
+                },
+                multiview: None,
+            });
 
         Self {
             desc,
@@ -318,7 +326,6 @@ pub struct ResourceManager {
     buffers: Vec<Buffer>,
     textures: Vec<Texture>,
     samplers: Vec<Sampler>,
-    bind_group_layouts: Vec<BindGroupLayout>,
     bind_groups: Vec<BindGroup>,
     shaders: Vec<Shader>,
 
@@ -341,7 +348,6 @@ impl ResourceManager {
             buffers: vec![],
             textures: vec![],
             samplers: vec![],
-            bind_group_layouts: vec![],
             bind_groups: vec![],
             shaders: vec![],
 
@@ -352,7 +358,7 @@ impl ResourceManager {
     pub fn create_buffer(&mut self, desc: &BufferDesc) -> Handle {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: desc.label,
-            size: desc.byte_size,
+            size: desc.byte_size as u64,
             usage: desc.usage,
             mapped_at_creation: false,
         });
@@ -445,66 +451,7 @@ impl ResourceManager {
         Handle(self.samplers.len() - 1)
     }
 
-    pub fn create_bind_group_layout(&mut self, desc: BindGroupLayoutDesc) -> Handle {
-        let mut i = 0;
-        let mut entries: Vec<wgpu::BindGroupLayoutEntry> = vec![];
-
-        for entry in desc.buffers {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: i,
-                visibility: desc.visibility,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(*entry),
-                },
-                count: None,
-            });
-
-            i += 1;
-        }
-
-        for entry in desc.textures {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: i,
-                visibility: desc.visibility,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: *entry,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            });
-
-            i += 1;
-        }
-
-        for entry in desc.samplers {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: i,
-                visibility: desc.visibility,
-                ty: wgpu::BindingType::Sampler(*entry),
-                count: None,
-            });
-
-            i += 1;
-        }
-
-        let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: desc.label,
-                    entries: entries.as_slice(),
-                });
-
-        self.bind_group_layouts.push(BindGroupLayout {
-            internal: bind_group_layout,
-        });
-
-        Handle(self.bind_group_layouts.len() - 1)
-    }
-
-    pub fn create_bind_group(&mut self, desc: BindGroupDesc) -> Handle {
+    pub fn create_bind_group(&mut self, desc: &BindGroupDesc) -> Handle {
         let mut i = 0;
         let mut entries: Vec<wgpu::BindGroupEntry> = vec![];
 
@@ -537,7 +484,7 @@ impl ResourceManager {
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: desc.label,
-            layout: &self.bind_group_layouts[desc.layout.0].internal,
+            layout: &self.get_bind_group_layout(&desc.layout),
             entries: entries.as_slice(),
         });
 
@@ -545,7 +492,7 @@ impl ResourceManager {
             internal: bind_group,
         });
 
-        Handle(self.bind_group_layouts.len() - 1)
+        Handle(self.bind_groups.len() - 1)
     }
 
     pub fn create_shader(&mut self, desc: ShaderDesc) -> Handle {
@@ -562,6 +509,61 @@ impl ResourceManager {
 
     pub fn get_shader(&self, handle: Handle) -> &Shader {
         &self.shaders[handle.0]
+    }
+
+    fn get_bind_group_layout(&self, desc: &BindGroupLayoutDesc) -> wgpu::BindGroupLayout {
+        let mut i = 0;
+        let mut entries: Vec<wgpu::BindGroupLayoutEntry> = vec![];
+
+        for entry in &desc.buffers {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: i,
+                visibility: desc.visibility,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(*entry as u64),
+                },
+                count: None,
+            });
+
+            i += 1;
+        }
+
+        for entry in &desc.textures {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: i,
+                visibility: desc.visibility,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: *entry,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            });
+
+            i += 1;
+        }
+
+        for entry in &desc.samplers {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: i,
+                visibility: desc.visibility,
+                ty: wgpu::BindingType::Sampler(*entry),
+                count: None,
+            });
+
+            i += 1;
+        }
+
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: desc.label.as_deref(),
+                    entries: entries.as_slice(),
+                });
+
+        bind_group_layout
     }
 
     pub fn update_buffer(&self, handle: Handle, data: &[u8]) {
@@ -597,10 +599,6 @@ impl ResourceManager {
         ui.label(format!("Buffers created: {}", self.buffers.len()));
         ui.label(format!("Textures created: {}", self.textures.len()));
         ui.label(format!("Samplers created: {}", self.samplers.len()));
-        ui.label(format!(
-            "BindGroupLayouts created: {}",
-            self.bind_group_layouts.len()
-        ));
         ui.label(format!("BindGroups created: {}", self.bind_groups.len()));
         ui.label(format!("Shaders created: {}", self.shaders.len()));
 
@@ -617,6 +615,7 @@ impl ResourceManager {
                 if ui.button("Reload").clicked() {
                     self.recompile(Handle(i));
                 }
+                ui.end_row();
             }
         });
 
