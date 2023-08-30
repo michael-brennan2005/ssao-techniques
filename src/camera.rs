@@ -7,8 +7,6 @@ pub struct Camera {
     eye: Vec3,
     front: Vec3,
     up: Vec3,
-    pitch: f32,
-    yaw: f32,
 
     fov_y_radians: f32,
     aspect_ratio: f32,
@@ -20,10 +18,8 @@ impl Default for Camera {
     fn default() -> Self {
         Self {
             eye: vec3(0.0, 3.0, -3.0),
-            front: (vec3(0.0, 0.0, 0.0) - vec3(0.0, 3.0, -3.0)).normalize(),
+            front: vec3(0.0, 0.0, 1.0),
             up: vec3(0.0, 1.0, 0.0),
-            pitch: 0.0,
-            yaw: 90.0,
 
             fov_y_radians: 90.0,
             aspect_ratio: 1600.0 / 900.0,
@@ -36,7 +32,7 @@ impl Default for Camera {
 impl Camera {
     pub fn build_uniforms(&self) -> SceneUniformData {
         let perspective = Mat4::perspective_lh(
-            self.fov_y_radians,
+            self.fov_y_radians.to_radians(),
             self.aspect_ratio,
             self.z_near,
             self.z_far,
@@ -64,7 +60,8 @@ pub trait CameraController {
 }
 
 pub struct FlyCamera {
-    direction: Vec3,
+    camera_dir: Vec3,
+    movement_dir: Vec3,
     max_speed: f32,
 
     right_click: bool,
@@ -78,7 +75,8 @@ pub struct FlyCamera {
 impl FlyCamera {
     pub fn new() -> Self {
         FlyCamera {
-            direction: vec3(0.0, 0.0, 0.0),
+            camera_dir: vec3(0.0, 0.0, 1.0),
+            movement_dir: vec3(0.0, 0.0, 0.0),
             max_speed: 10.0,
 
             right_click: false,
@@ -105,22 +103,22 @@ impl CameraController for FlyCamera {
                 let is_pressed = *state == ElementState::Pressed;
                 match keycode {
                     VirtualKeyCode::W | VirtualKeyCode::Up => {
-                        self.direction.z = if is_pressed { 1.0 } else { 0.0 };
+                        self.movement_dir.z = if is_pressed { 1.0 } else { 0.0 };
                     }
                     VirtualKeyCode::A | VirtualKeyCode::Left => {
-                        self.direction.x = if is_pressed { -1.0 } else { 0.0 };
+                        self.movement_dir.x = if is_pressed { -1.0 } else { 0.0 };
                     }
                     VirtualKeyCode::S | VirtualKeyCode::Down => {
-                        self.direction.z = if is_pressed { -1.0 } else { 0.0 };
+                        self.movement_dir.z = if is_pressed { -1.0 } else { 0.0 };
                     }
                     VirtualKeyCode::D | VirtualKeyCode::Right => {
-                        self.direction.x = if is_pressed { 1.0 } else { 0.0 };
+                        self.movement_dir.x = if is_pressed { 1.0 } else { 0.0 };
                     }
                     VirtualKeyCode::E => {
-                        self.direction.y = if is_pressed { 1.0 } else { 0.0 };
+                        self.movement_dir.y = if is_pressed { 1.0 } else { 0.0 };
                     }
                     VirtualKeyCode::Q => {
-                        self.direction.y = if is_pressed { -1.0 } else { 0.0 };
+                        self.movement_dir.y = if is_pressed { -1.0 } else { 0.0 };
                     }
                     _ => {}
                 }
@@ -162,10 +160,11 @@ impl CameraController for FlyCamera {
                 x_offset *= sensitivity;
                 y_offset *= sensitivity;
                 self.yaw -= x_offset;
+                self.yaw = self.yaw % 360.0;
                 self.pitch -= y_offset;
 
                 self.pitch = self.pitch.clamp(-89.0, 89.0);
-                self.direction = vec3(
+                self.camera_dir = vec3(
                     f32::cos(self.yaw.to_radians()) * f32::cos(self.pitch.to_radians()),
                     f32::sin(self.pitch.to_radians()),
                     f32::sin(self.yaw.to_radians()) * f32::cos(self.pitch.to_radians()),
@@ -176,16 +175,17 @@ impl CameraController for FlyCamera {
     }
 
     fn update(&mut self, camera: &mut Camera) {
-        camera.front = self.direction;
+        camera.front = self.camera_dir;
 
-        camera.eye += camera.front * self.direction.z * self.max_speed;
+        camera.eye += camera.front * self.movement_dir.z * (self.max_speed / 144.0);
         camera.eye += Vec3::normalize(Vec3::cross(camera.up, camera.front))
-            * self.direction.x
-            * self.max_speed;
+            * self.movement_dir.x
+            * (self.max_speed / 144.0);
 
         let right = Vec3::normalize(Vec3::cross(camera.up, camera.front));
-        camera.eye +=
-            Vec3::normalize(Vec3::cross(camera.front, right)) * self.direction.y * self.max_speed;
+        camera.eye += Vec3::normalize(Vec3::cross(camera.front, right))
+            * self.movement_dir.y
+            * (self.max_speed / 144.0);
     }
 
     fn ui(&mut self, camera: &mut Camera, ui: &mut egui::Ui) {

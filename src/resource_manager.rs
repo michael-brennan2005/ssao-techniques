@@ -3,8 +3,9 @@ use std::{borrow::Cow, collections::HashMap, num::NonZeroU64};
 use egui::Color32;
 use pollster::block_on;
 pub use wgpu::{
-    AddressMode, BufferAddress, BufferUsages, CompareFunction, FilterMode, SamplerBindingType,
-    ShaderStages, TextureFormat, TextureSampleType, TextureUsages, VertexAttribute, VertexStepMode,
+    AddressMode, BufferAddress, BufferSlice, BufferUsages, CompareFunction, FilterMode,
+    SamplerBindingType, ShaderStages, TextureFormat, TextureSampleType, TextureUsages,
+    VertexAttribute, VertexStepMode,
 };
 
 // MARK: Descriptors
@@ -170,6 +171,12 @@ pub struct Buffer {
     internal: wgpu::Buffer,
 }
 
+impl Buffer {
+    pub fn slice(&self) -> BufferSlice {
+        self.internal.slice(..)
+    }
+}
+
 pub struct Texture {
     internal: wgpu::Texture,
     view: wgpu::TextureView,
@@ -315,7 +322,16 @@ impl Shader {
 
 // MARK: Resource manager
 #[derive(Clone, Copy)]
-pub struct Handle(usize);
+pub struct Handle(usize, HandleType);
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum HandleType {
+    BUFFER,
+    TEXTURE,
+    SAMPLER,
+    BINDGROUP,
+    SHADER,
+}
 
 pub struct ResourceManager {
     pub device: wgpu::Device,
@@ -369,7 +385,7 @@ impl ResourceManager {
 
         self.buffers.push(Buffer { internal: buffer });
 
-        Handle(self.buffers.len() - 1)
+        Handle(self.buffers.len() - 1, HandleType::BUFFER)
     }
 
     pub fn create_texture(&mut self, desc: &TextureDesc) -> Handle {
@@ -423,7 +439,7 @@ impl ResourceManager {
             view,
         });
 
-        Handle(self.textures.len() - 1)
+        Handle(self.textures.len() - 1, HandleType::TEXTURE)
     }
 
     pub fn create_sampler(&mut self, desc: SamplerDesc) -> Handle {
@@ -448,7 +464,7 @@ impl ResourceManager {
 
         self.samplers.push(Sampler { internal: sampler });
 
-        Handle(self.samplers.len() - 1)
+        Handle(self.samplers.len() - 1, HandleType::SAMPLER)
     }
 
     pub fn create_bind_group(&mut self, desc: &BindGroupDesc) -> Handle {
@@ -492,7 +508,7 @@ impl ResourceManager {
             internal: bind_group,
         });
 
-        Handle(self.bind_groups.len() - 1)
+        Handle(self.bind_groups.len() - 1, HandleType::BINDGROUP)
     }
 
     pub fn create_shader(&mut self, desc: ShaderDesc) -> Handle {
@@ -500,14 +516,27 @@ impl ResourceManager {
 
         self.shaders.push(shader);
 
-        Handle(self.shaders.len() - 1)
+        Handle(self.shaders.len() - 1, HandleType::SHADER)
+    }
+
+    pub fn get_buffer(&self, handle: Handle) -> &Buffer {
+        if handle.1 != HandleType::BUFFER {
+            panic!("Handle type is incorrect.");
+        }
+        &self.buffers[handle.0]
     }
 
     pub fn get_texture(&self, handle: Handle) -> &Texture {
+        if handle.1 != HandleType::TEXTURE {
+            panic!("Handle type is incorrect.");
+        }
         &self.textures[handle.0]
     }
 
     pub fn get_shader(&self, handle: Handle) -> &Shader {
+        if handle.1 != HandleType::SHADER {
+            panic!("Handle type is incorrect.");
+        }
         &self.shaders[handle.0]
     }
 
@@ -566,6 +595,13 @@ impl ResourceManager {
         bind_group_layout
     }
 
+    pub fn get_bind_group(&self, handle: Handle) -> &wgpu::BindGroup {
+        if handle.1 != HandleType::BINDGROUP {
+            panic!("Expected handle type bindgroup, got {:?}", handle.1);
+        }
+        &self.bind_groups[handle.0].internal
+    }
+
     pub fn update_buffer(&self, handle: Handle, data: &[u8]) {
         self.queue
             .write_buffer(&self.buffers[handle.0].internal, 0, data);
@@ -613,7 +649,7 @@ impl ResourceManager {
             for (i, path) in paths.iter().enumerate() {
                 ui.label(path);
                 if ui.button("Reload").clicked() {
-                    self.recompile(Handle(i));
+                    self.recompile(Handle(i, HandleType::SHADER));
                 }
                 ui.end_row();
             }

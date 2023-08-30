@@ -62,6 +62,7 @@ pub struct Mesh {
     pub bind_group: Handle,
     pub vertex_buffer: Handle,
     pub index_buffer: Handle,
+    pub index_count: u32,
 }
 
 impl Mesh {
@@ -70,11 +71,12 @@ impl Mesh {
         uniform_buffer: Handle,
         vertex_buffer: Handle,
         index_buffer: Handle,
+        index_count: u32,
     ) -> Self {
         let bind_group = rm.create_bind_group(&BindGroupDesc {
             label: None,
             visibility: ShaderStages::all(),
-            layout: Mesh::bind_group_layout(&rm),
+            layout: Mesh::bind_group_layout(),
             buffers: &[uniform_buffer],
             textures: &[],
             samplers: &[],
@@ -85,10 +87,11 @@ impl Mesh {
             bind_group,
             vertex_buffer,
             index_buffer,
+            index_count,
         }
     }
 
-    pub fn bind_group_layout(rm: &ResourceManager) -> BindGroupLayoutDesc {
+    pub fn bind_group_layout() -> BindGroupLayoutDesc {
         BindGroupLayoutDesc {
             label: None,
             visibility: ShaderStages::all(),
@@ -100,7 +103,8 @@ impl Mesh {
 }
 
 pub struct Scene {
-    pub scene_uniform: Handle,
+    pub scene_uniform_buffer: Handle,
+    pub scene_uniform_bind_group: Handle,
     pub meshes: Vec<Mesh>,
 }
 
@@ -143,13 +147,13 @@ impl Scene {
                 let positions = reader
                     .read_positions()
                     .expect("Couldn't read positions")
-                    .map(|pos| [pos[0], pos[1], pos[2]]);
+                    .map(|pos| [pos[0], pos[1], pos[2] * -1.0]);
                 let normals = reader
                     .read_normals()
                     .expect("Couldn't read normals")
                     .map(|pos| [pos[0], pos[1], pos[2]]);
 
-                let mut vertices = positions
+                let vertices = positions
                     .zip(normals)
                     .map(|(position, normal)| VertexAttributes { position, normal })
                     .collect::<Vec<_>>();
@@ -183,7 +187,13 @@ impl Scene {
                     initial_data: Some(bytemuck::cast_slice(indices.as_slice())),
                 });
 
-                meshes.push(Mesh::new(rm, uniform_buffer, vertex_buffer, index_buffer));
+                meshes.push(Mesh::new(
+                    rm,
+                    uniform_buffer,
+                    vertex_buffer,
+                    index_buffer,
+                    indices.len() as u32,
+                ));
             }
         }
 
@@ -208,30 +218,60 @@ impl Scene {
             meshes.append(&mut Scene::walk_gltf(rm, &node, Mat4::IDENTITY, &buffers));
         }
 
-        let scene_uniform = rm.create_buffer(&BufferDesc {
+        let scene_uniform_buffer = rm.create_buffer(&BufferDesc {
             label: Some("Scene uniform buffer"),
             byte_size: std::mem::size_of::<SceneUniformData>(),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             initial_data: Some(bytemuck::cast_slice(&[SceneUniformData::default()])),
         });
 
+        let scene_uniform_bind_group = rm.create_bind_group(&BindGroupDesc {
+            label: None,
+            visibility: ShaderStages::VERTEX_FRAGMENT,
+            layout: Scene::scene_bind_group_layout(),
+            buffers: &[scene_uniform_buffer],
+            textures: &[],
+            samplers: &[],
+        });
+
         Self {
-            scene_uniform,
+            scene_uniform_buffer,
+            scene_uniform_bind_group,
             meshes,
         }
     }
 
     pub fn new(rm: &mut ResourceManager) -> Self {
-        let scene_uniform = rm.create_buffer(&BufferDesc {
+        let scene_uniform_buffer = rm.create_buffer(&BufferDesc {
             label: Some("Scene uniform buffer"),
             byte_size: std::mem::size_of::<SceneUniformData>(),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             initial_data: Some(bytemuck::cast_slice(&[SceneUniformData::default()])),
         });
 
+        let scene_uniform_bind_group = rm.create_bind_group(&BindGroupDesc {
+            label: None,
+            visibility: ShaderStages::VERTEX_FRAGMENT,
+            layout: Scene::scene_bind_group_layout(),
+            buffers: &[scene_uniform_buffer],
+            textures: &[],
+            samplers: &[],
+        });
+
         Self {
-            scene_uniform,
+            scene_uniform_buffer,
+            scene_uniform_bind_group,
             meshes: vec![],
+        }
+    }
+
+    pub fn scene_bind_group_layout() -> BindGroupLayoutDesc {
+        BindGroupLayoutDesc {
+            label: None,
+            visibility: ShaderStages::VERTEX_FRAGMENT,
+            buffers: vec![std::mem::size_of::<SceneUniformData>()],
+            textures: vec![],
+            samplers: vec![],
         }
     }
 }
