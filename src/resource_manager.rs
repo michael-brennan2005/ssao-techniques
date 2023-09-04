@@ -178,6 +178,7 @@ impl Buffer {
 }
 
 pub struct Texture {
+    pub depth: bool,
     internal: wgpu::Texture,
     view: wgpu::TextureView,
 }
@@ -409,6 +410,7 @@ impl ResourceManager {
         let bytes_per_pixel = match desc.format {
             TextureFormat::Rgba8UnormSrgb => 4,
             TextureFormat::Depth32Float => 4,
+            TextureFormat::Rgba16Float => 8,
             _ => panic!("Unsupported format {:?}", desc.format),
         };
 
@@ -437,6 +439,14 @@ impl ResourceManager {
         self.textures.push(Texture {
             internal: texture,
             view,
+            depth: match desc.format {
+                TextureFormat::Depth16Unorm
+                | TextureFormat::Depth24Plus
+                | TextureFormat::Depth24PlusStencil8
+                | TextureFormat::Depth32Float
+                | TextureFormat::Depth32FloatStencil8 => true,
+                _ => false,
+            },
         });
 
         Handle(self.textures.len() - 1, HandleType::TEXTURE)

@@ -14,9 +14,11 @@ pub const HEIGHT: u32 = 900;
 pub const BACKEND: wgpu::Backends = wgpu::Backends::DX12;
 
 mod camera;
+mod crytek_ssao;
 mod renderer;
 mod resource_manager;
 mod scene;
+mod texture_debug_view;
 
 pub struct EguiRenderData {
     clipped_primitives: Vec<ClippedPrimitive>,

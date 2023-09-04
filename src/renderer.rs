@@ -3,25 +3,37 @@ use winit::event::WindowEvent;
 
 use crate::{
     camera::{Camera, CameraController, FlyCamera},
+    crytek_ssao::CrytekSSAO,
     resource_manager::{
         BindGroupLayoutDesc, CompareFunction, Handle, ResourceManager, ShaderDesc,
         ShaderModuleDesc, ShaderPipelineDesc, TextureDesc, TextureFormat, TextureUsages,
         VertexBufferLayout, DEPTH_FORMAT,
     },
     scene::{Mesh, Scene, SceneUniformData, VertexAttributes},
+    texture_debug_view::TextureDebugView,
     EguiRenderData,
 };
+
+#[derive(PartialEq, Eq)]
+enum DebugView {
+    None,
+    DepthBuffer,
+}
 
 pub struct Renderer {
     rm: ResourceManager,
     egui: egui_wgpu::Renderer,
     scene: Scene,
+    debug_view: DebugView,
 
     camera: Camera,
     camera_controller: Box<dyn CameraController>,
 
     depth_buffer: Handle,
+    depth_buffer_debug: TextureDebugView,
     shader: Handle,
+
+    crytek_ssao: CrytekSSAO,
 }
 
 impl Renderer {
@@ -39,7 +51,7 @@ impl Renderer {
             ),
             mipmaps: None,
             format: DEPTH_FORMAT,
-            usage: TextureUsages::RENDER_ATTACHMENT,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
             initial_data: None,
         });
 
@@ -74,6 +86,8 @@ impl Renderer {
             },
         });
 
+        let depth_buffer_debug = TextureDebugView::new(&mut rm, depth_buffer);
+
         let egui = egui_wgpu::renderer::Renderer::new(
             &rm.device,
             rm.surface_configuration.format,
@@ -81,14 +95,19 @@ impl Renderer {
             1,
         );
 
+        let crytek_ssao = CrytekSSAO::new(&mut rm, depth_buffer);
+
         Self {
             scene,
             rm,
             depth_buffer,
+            depth_buffer_debug,
+            debug_view: DebugView::None,
             shader,
             egui,
             camera,
             camera_controller: fly_camera,
+            crytek_ssao,
         }
     }
 
@@ -111,6 +130,11 @@ impl Renderer {
             });
 
             self.camera_controller.ui(&mut self.camera, ui);
+
+            egui::CollapsingHeader::new("Debug views").show(ui, |ui| {
+                ui.selectable_value(&mut self.debug_view, DebugView::None, "None");
+                ui.selectable_value(&mut self.debug_view, DebugView::DepthBuffer, "Depth buffer");
+            });
         });
     }
 
@@ -169,6 +193,14 @@ impl Renderer {
             }
         }
 
+        {
+            match self.debug_view {
+                DebugView::None => {}
+                DebugView::DepthBuffer => {
+                    self.depth_buffer_debug.pass(&self.rm, &mut encoder, &view)
+                }
+            }
+        }
         self.render_egui(&view, &mut encoder, egui_render_data);
         self.rm.queue.submit(std::iter::once(encoder.finish()));
         output.present();
